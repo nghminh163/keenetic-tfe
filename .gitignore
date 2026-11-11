@@ -1,0 +1,21 @@
+# build output
+terraform-provider-keenetic
+dist/
+
+# local tofu/terraform test state
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+
+# dev override config (may contain local paths)
+.terraformrc
+dev.tfrc
+
+# go
+vendor/
+
+# local creds
+.keenetic.env
+*.env
