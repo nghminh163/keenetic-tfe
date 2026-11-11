@@ -95,6 +95,8 @@ func (p *keeneticProvider) Configure(ctx context.Context, req provider.Configure
 func (p *keeneticProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewSegmentResource,
+		NewStaticLeaseResource,
+		NewMDNSReflectorResource,
 	}
 }
 

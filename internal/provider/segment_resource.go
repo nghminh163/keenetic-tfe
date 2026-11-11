@@ -27,7 +27,48 @@ var (
 	_ resource.ResourceWithImportState = (*segmentResource)(nil)
 )
 
-var regexBridge = regexp.MustCompile(`^Bridge\d+$`)
+var (
+	regexBridge = regexp.MustCompile(`^Bridge\d+$`)
+	regexAP2    = regexp.MustCompile(`^WifiMaster0/AccessPoint\d+$`)
+	regexAP5    = regexp.MustCompile(`^WifiMaster1/AccessPoint\d+$`)
+)
+
+// wifiBandSchema builds the schema for one Wi-Fi band; apRegex pins it to the right radio's slots.
+func wifiBandSchema(band string, apRegex *regexp.Regexp, example string) schema.SingleNestedAttribute {
+	return schema.SingleNestedAttribute{
+		Optional:            true,
+		MarkdownDescription: "The " + band + " access point for this segment.",
+		Attributes: map[string]schema.Attribute{
+			"access_point": schema.StringAttribute{
+				Required:            true,
+				MarkdownDescription: "Spare access-point slot for " + band + ", e.g. `" + example + "`.",
+				Validators:          []validator.String{stringvalidator.RegexMatches(apRegex, "must be a "+band+" access point like \""+example+"\"")},
+			},
+			"ssid": schema.StringAttribute{
+				Required:            true,
+				MarkdownDescription: "Network name (SSID) this AP broadcasts.",
+			},
+			"psk": schema.StringAttribute{
+				Optional:            true,
+				Sensitive:           true,
+				MarkdownDescription: "Pre-shared key. Required unless `security = \"open\"`; keep it out of committed config (env/secret store).",
+			},
+			"security": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				Default:             stringdefault.StaticString("wpa2-psk"),
+				MarkdownDescription: "`wpa2-psk` (default) | `wpa-wpa2-psk` | `wpa-psk` | `open`.",
+				Validators:          []validator.String{stringvalidator.OneOf("wpa2-psk", "wpa-wpa2-psk", "wpa-psk", "open")},
+			},
+			"enabled": schema.BoolAttribute{
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(true),
+				MarkdownDescription: "Broadcast (AP up). `false` keeps the AP configured but down. Default `true`.",
+			},
+		},
+	}
+}
 
 // NewSegmentResource is the factory registered with the provider.
 func NewSegmentResource() resource.Resource {
@@ -43,7 +84,8 @@ type segmentModel struct {
 	Description   types.String `tfsdk:"description"`
 	SecurityLevel types.String `tfsdk:"security_level"`
 	Up            types.Bool   `tfsdk:"up"`
-	IPv4          *ipv4Model   `tfsdk:"ipv4"`
+	IPv4          *ipv4Model     `tfsdk:"ipv4"`
+	Wireless      *wirelessModel `tfsdk:"wireless"`
 }
 
 type ipv4Model struct {
@@ -59,6 +101,19 @@ type dhcpModel struct {
 	RangeEnd   types.String `tfsdk:"range_end"`
 	DNSServers types.List   `tfsdk:"dns_servers"`
 	LeaseTime  types.Int64  `tfsdk:"lease_time"`
+}
+
+type wirelessModel struct {
+	Band2 *wifiBandModel `tfsdk:"band_2ghz"`
+	Band5 *wifiBandModel `tfsdk:"band_5ghz"`
+}
+
+type wifiBandModel struct {
+	AccessPoint types.String `tfsdk:"access_point"`
+	SSID        types.String `tfsdk:"ssid"`
+	PSK         types.String `tfsdk:"psk"`
+	Security    types.String `tfsdk:"security"`
+	Enabled     types.Bool   `tfsdk:"enabled"`
 }
 
 func (r *segmentResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -96,6 +151,16 @@ func (r *segmentResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:            true,
 				Default:             booldefault.StaticBool(true),
 				MarkdownDescription: "Interface administratively up. Default `true`.",
+			},
+			"wireless": schema.SingleNestedAttribute{
+				Optional: true,
+				MarkdownDescription: "Wi-Fi access points bound to this segment, up to one per band. Each uses a spare " +
+					"`WifiMaster<n>/AccessPoint<m>` slot (0/1 are the router's own networks) and is included in the " +
+					"segment's bridge.",
+				Attributes: map[string]schema.Attribute{
+					"band_2ghz": wifiBandSchema("2.4 GHz", regexAP2, "WifiMaster0/AccessPoint2"),
+					"band_5ghz": wifiBandSchema("5 GHz", regexAP5, "WifiMaster1/AccessPoint2"),
+				},
 			},
 			"ipv4": schema.SingleNestedAttribute{
 				Required:            true,
@@ -288,7 +353,37 @@ func toSegment(ctx context.Context, m segmentModel) (client.Segment, diag.Diagno
 			seg.DHCP = &dhcp
 		}
 	}
+	if w := m.Wireless; w != nil {
+		wl := &client.Wireless{}
+		if w.Band2 != nil {
+			wl.Band2 = toBand(w.Band2)
+		}
+		if w.Band5 != nil {
+			wl.Band5 = toBand(w.Band5)
+		}
+		seg.Wireless = wl
+	}
 	return seg, diags
+}
+
+func toBand(b *wifiBandModel) *client.WifiBand {
+	return &client.WifiBand{
+		AccessPoint: b.AccessPoint.ValueString(),
+		SSID:        b.SSID.ValueString(),
+		PSK:         b.PSK.ValueString(),
+		Security:    b.Security.ValueString(),
+		Enabled:     b.Enabled.ValueBool(),
+	}
+}
+
+func fromBand(b *client.WifiBand) *wifiBandModel {
+	return &wifiBandModel{
+		AccessPoint: types.StringValue(b.AccessPoint),
+		SSID:        types.StringValue(b.SSID),
+		PSK:         stringOrNull(b.PSK),
+		Security:    types.StringValue(b.Security),
+		Enabled:     types.BoolValue(b.Enabled),
+	}
 }
 
 // applySegment copies router state into the model.
@@ -321,6 +416,19 @@ func applySegment(ctx context.Context, seg *client.Segment, m *segmentModel) dia
 		}
 	}
 	m.IPv4 = ipv4
+
+	if seg.Wireless != nil {
+		wm := &wirelessModel{}
+		if seg.Wireless.Band2 != nil {
+			wm.Band2 = fromBand(seg.Wireless.Band2)
+		}
+		if seg.Wireless.Band5 != nil {
+			wm.Band5 = fromBand(seg.Wireless.Band5)
+		}
+		m.Wireless = wm
+	} else {
+		m.Wireless = nil
+	}
 	return diags
 }
 

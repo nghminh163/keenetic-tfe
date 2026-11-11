@@ -4,8 +4,8 @@ An OpenTofu / Terraform provider for **Keenetic** routers, driving the router's 
 **RCI** HTTP API (the same one the web UI uses). Built because no Keenetic provider exists on the
 registry.
 
-Status: **segment management working** (`keenetic_segment`). More resources (DHCP pools, static
-leases, Wi-Fi) to follow.
+Status: **working.** `keenetic_segment` (IPv4 + DHCP pool + Wi-Fi), `keenetic_static_lease` (DHCP
+reservations) and `keenetic_mdns_reflector` (global mDNS). Verified end-to-end against a live router.
 
 ## Authentication
 
@@ -54,6 +54,34 @@ resource "keenetic_segment" "test" {
 
   # security_level = "private"   # private | protected | public (default private)
   # up             = true        # default true
+
+  # Optional Wi-Fi: up to one AP per band, each on a spare WifiMaster<n>/AccessPoint<m> slot
+  # (slots 0/1 are the router's own networks). The AP is configured and included in the bridge.
+  wireless = {
+    band_2ghz = {
+      access_point = "WifiMaster0/AccessPoint2" # 2.4 GHz -> WifiMaster0/*
+      ssid         = "my-24"
+      psk          = var.wifi_psk               # sensitive; keep out of committed config
+      # security   = "wpa2-psk"                 # wpa2-psk | wpa-wpa2-psk | wpa-psk | open
+      # enabled    = true                       # false keeps the AP configured but down
+    }
+    band_5ghz = {
+      access_point = "WifiMaster1/AccessPoint2" # 5 GHz -> WifiMaster1/*
+      ssid         = "my-5"
+      psk          = var.wifi_psk
+    }
+  }
+}
+
+# DHCP static reservation (global `ip dhcp host`; owns only the MAC it declares).
+resource "keenetic_static_lease" "nas" {
+  mac = "aa:bb:cc:dd:ee:ff"
+  ip  = "192.168.90.10"
+}
+
+# Global mDNS reflector (relays Bonjour/Chromecast between segments). One per router.
+resource "keenetic_mdns_reflector" "this" {
+  enforce = true
 }
 ```
 
@@ -91,17 +119,24 @@ interface, a re-plan is clean, destroy removes it (confirmed directly over RCI).
 ```
 main.go                       provider server entry (address registry.terraform.io/nghminh163/keenetic)
 internal/client/client.go     RCI client: NDM auth, GET/POST, config save, error parsing
-internal/client/segment.go    segment model + Get/Apply/Delete
-internal/provider/provider.go provider schema + configuration
-internal/provider/segment_resource.go   keenetic_segment resource (CRUD + import)
+internal/client/segment.go    segment model + Get/Apply/Delete (orchestrates DHCP + Wi-Fi)
+internal/client/wireless.go   access-point config + bridge membership (per-band)
+internal/client/static_lease.go  ip dhcp host get/apply/delete
+internal/client/mdns.go       global mDNS reflector get/set
+internal/provider/provider.go provider schema + configuration (registers all resources)
+internal/provider/segment_resource.go       keenetic_segment (CRUD + import)
+internal/provider/static_lease_resource.go  keenetic_static_lease (CRUD + import)
+internal/provider/mdns_resource.go          keenetic_mdns_reflector (CRUD)
 examples/segment/main.tf      runnable example
 ```
 
 ## Roadmap
 
 - [x] `keenetic_segment.ipv4.dhcp` — per-segment DHCP pool (range, **DNS servers**, lease).
-- [ ] DHCP static leases (`ip dhcp host`).
-- [ ] `ipv4.relay_multicast_dns` — mDNS reflector toggle.
-- [ ] `wireless { band_2ghz, band_5ghz }` — SSID / security / PSK (sensitive) per band.
-- [ ] Segment membership (ports / VLAN / Wi-Fi AP binding) and ACLs.
-- [ ] Publish to the OpenTofu registry so CI can `init` it without dev overrides.
+- [x] `keenetic_static_lease` — DHCP reservations (`ip dhcp host`), keyed per MAC.
+- [x] `keenetic_mdns_reflector` — global mDNS reflector (it is router-wide in RCI, so a resource of its
+  own rather than a per-segment field).
+- [x] `keenetic_segment.wireless { band_2ghz, band_5ghz }` — SSID / security / PSK (sensitive) / enabled
+  per band, on a spare AP slot, bound to the segment's bridge.
+- [ ] Segment membership (ports / VLAN) and ACLs.
+- [ ] Publish to the OpenTofu registry so CI can `init` it without dev overrides / a built mirror.
