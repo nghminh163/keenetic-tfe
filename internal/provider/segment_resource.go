@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -86,6 +87,7 @@ type segmentModel struct {
 	Up            types.Bool   `tfsdk:"up"`
 	IPv4          *ipv4Model     `tfsdk:"ipv4"`
 	Wireless      *wirelessModel `tfsdk:"wireless"`
+	VLAN          *vlanModel     `tfsdk:"vlan"`
 }
 
 type ipv4Model struct {
@@ -114,6 +116,11 @@ type wifiBandModel struct {
 	PSK         types.String `tfsdk:"psk"`
 	Security    types.String `tfsdk:"security"`
 	Enabled     types.Bool   `tfsdk:"enabled"`
+}
+
+type vlanModel struct {
+	ID    types.Int64 `tfsdk:"id"`
+	Ports types.List  `tfsdk:"ports"`
 }
 
 func (r *segmentResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -160,6 +167,24 @@ func (r *segmentResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Attributes: map[string]schema.Attribute{
 					"band_2ghz": wifiBandSchema("2.4 GHz", regexAP2, "WifiMaster0/AccessPoint2"),
 					"band_5ghz": wifiBandSchema("5 GHz", regexAP5, "WifiMaster1/AccessPoint2"),
+				},
+			},
+			"vlan": schema.SingleNestedAttribute{
+				Optional: true,
+				MarkdownDescription: "802.1Q VLAN carried by this segment: a VLAN id tagged on one or more physical " +
+					"ports (each becomes a `<port>/Vlan<id>` sub-interface included in the bridge). Applying a VLAN id " +
+					"already carried by another segment fails with a conflict error.",
+				Attributes: map[string]schema.Attribute{
+					"id": schema.Int64Attribute{
+						Required:            true,
+						MarkdownDescription: "VLAN id, 1–4094.",
+						Validators:          []validator.Int64{int64validator.Between(1, 4094)},
+					},
+					"ports": schema.ListAttribute{
+						Required:            true,
+						ElementType:         types.StringType,
+						MarkdownDescription: "Physical ports to tag, e.g. `[\"GigabitEthernet0\", \"GigabitEthernet1\"]`.",
+					},
 				},
 			},
 			"ipv4": schema.SingleNestedAttribute{
@@ -363,6 +388,15 @@ func toSegment(ctx context.Context, m segmentModel) (client.Segment, diag.Diagno
 		}
 		seg.Wireless = wl
 	}
+	if v := m.VLAN; v != nil {
+		vl := &client.VLAN{ID: int(v.ID.ValueInt64())}
+		if !v.Ports.IsNull() && !v.Ports.IsUnknown() {
+			var ports []string
+			diags.Append(v.Ports.ElementsAs(ctx, &ports, false)...)
+			vl.Ports = ports
+		}
+		seg.VLAN = vl
+	}
 	return seg, diags
 }
 
@@ -428,6 +462,14 @@ func applySegment(ctx context.Context, seg *client.Segment, m *segmentModel) dia
 		m.Wireless = wm
 	} else {
 		m.Wireless = nil
+	}
+
+	if seg.VLAN != nil {
+		ports, pd := types.ListValueFrom(ctx, types.StringType, seg.VLAN.Ports)
+		diags.Append(pd...)
+		m.VLAN = &vlanModel{ID: types.Int64Value(int64(seg.VLAN.ID)), Ports: ports}
+	} else {
+		m.VLAN = nil
 	}
 	return diags
 }

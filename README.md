@@ -4,8 +4,9 @@ An OpenTofu / Terraform provider for **Keenetic** routers, driving the router's 
 **RCI** HTTP API (the same one the web UI uses). Built because no Keenetic provider exists on the
 registry.
 
-Status: **working.** `keenetic_segment` (IPv4 + DHCP pool + Wi-Fi), `keenetic_static_lease` (DHCP
-reservations) and `keenetic_mdns_reflector` (global mDNS). Verified end-to-end against a live router.
+Status: **working.** `keenetic_segment` (IPv4 + DHCP pool + Wi-Fi + VLAN, with VLAN-conflict
+detection), `keenetic_static_lease` (DHCP reservations) and `keenetic_mdns_reflector` (global mDNS).
+Verified end-to-end against a live router.
 
 ## Authentication
 
@@ -54,6 +55,13 @@ resource "keenetic_segment" "test" {
 
   # security_level = "private"   # private | protected | public (default private)
   # up             = true        # default true
+
+  # Optional 802.1Q VLAN: one id tagged on physical ports (each -> a <port>/Vlan<id> sub-interface
+  # included in the bridge). Applying an id another segment already carries fails with a conflict.
+  vlan = {
+    id    = 89
+    ports = ["GigabitEthernet0", "GigabitEthernet1"]
+  }
 
   # Optional Wi-Fi: up to one AP per band, each on a spare WifiMaster<n>/AccessPoint<m> slot
   # (slots 0/1 are the router's own networks). The AP is configured and included in the bridge.
@@ -121,6 +129,7 @@ main.go                       provider server entry (address registry.terraform.
 internal/client/client.go     RCI client: NDM auth, GET/POST, config save, error parsing
 internal/client/segment.go    segment model + Get/Apply/Delete (orchestrates DHCP + Wi-Fi)
 internal/client/wireless.go   access-point config + bridge membership (per-band)
+internal/client/vlan.go       VLAN sub-interfaces + bridge membership + conflict detection
 internal/client/static_lease.go  ip dhcp host get/apply/delete
 internal/client/mdns.go       global mDNS reflector get/set
 internal/provider/provider.go provider schema + configuration (registers all resources)
@@ -138,5 +147,7 @@ examples/segment/main.tf      runnable example
   own rather than a per-segment field).
 - [x] `keenetic_segment.wireless { band_2ghz, band_5ghz }` — SSID / security / PSK (sensitive) / enabled
   per band, on a spare AP slot, bound to the segment's bridge.
-- [ ] Segment membership (ports / VLAN) and ACLs.
+- [x] `keenetic_segment.vlan { id, ports }` — 802.1Q VLAN sub-interfaces bound to the segment, with
+  conflict detection (refuses a VLAN id already carried by another segment).
+- [ ] Switch-port / `iseg` port assignment (tagged vs untagged ports) and ACLs.
 - [ ] Publish to the OpenTofu registry so CI can `init` it without dev overrides / a built mirror.

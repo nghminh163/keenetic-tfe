@@ -28,6 +28,7 @@ type Segment struct {
 	Up            bool
 	DHCP          *DHCP     // nil => this resource does not manage a DHCP pool for the segment
 	Wireless      *Wireless // nil => this resource does not manage Wi-Fi for the segment
+	VLAN          *VLAN     // nil => this resource does not manage a VLAN for the segment
 }
 
 // poolName is the DHCP pool name this provider uses for a segment (one pool per segment).
@@ -119,6 +120,13 @@ func (c *Client) GetSegment(ctx context.Context, name string) (*Segment, bool, e
 	}
 	seg.Wireless = w
 
+	// VLAN: <port>/Vlan<id> sub-interfaces included in this bridge.
+	v, err := readVLAN(all, name)
+	if err != nil {
+		return nil, false, err
+	}
+	seg.VLAN = v
+
 	return seg, true, nil
 }
 
@@ -182,6 +190,11 @@ func (c *Client) ApplySegment(ctx context.Context, s Segment) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Fail fast on a VLAN conflict, before creating/altering anything.
+	if err := c.checkVLANConflict(ctx, s.Name, s.VLAN); err != nil {
+		return err
+	}
+
 	cmds := []interface{}{interfaceCmd(s)} // interface first: the pool binds to it
 	if s.DHCP != nil {
 		pc, err := poolCmd(s)
@@ -206,6 +219,10 @@ func (c *Client) ApplySegment(ctx context.Context, s Segment) error {
 	if err := c.reconcileWireless(ctx, s.Name, s.Wireless); err != nil {
 		return err
 	}
+	// VLAN sub-interfaces are likewise created and included after the bridge exists.
+	if err := c.reconcileVLAN(ctx, s.Name, s.VLAN); err != nil {
+		return err
+	}
 	return c.save(ctx)
 }
 
@@ -214,8 +231,11 @@ func (c *Client) DeleteSegment(ctx context.Context, name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Detach + clear any Wi-Fi APs first, while the bridge still exists.
+	// Detach + clear any Wi-Fi APs and VLAN sub-interfaces first, while the bridge still exists.
 	if err := c.teardownWireless(ctx, name); err != nil {
+		return err
+	}
+	if err := c.teardownVLAN(ctx, name); err != nil {
 		return err
 	}
 
