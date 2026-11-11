@@ -35,7 +35,12 @@ type Client struct {
 	password string
 	http     *http.Client
 
-	mu sync.Mutex // serializes auth + writes (the router applies config non-atomically)
+	// mu serializes every RCI round-trip (get/post, and so save). The NDM challenge is bound to
+	// the session cookie in the shared jar, so two concurrent auth handshakes would overwrite each
+	// other's cookie and one POST /auth would be sent with the wrong session -> intermittent 401.
+	// Terraform drives resources in parallel (default -parallelism=10), so this must be held for the
+	// whole call, auth included, to keep each handshake + request atomic on the shared client.
+	mu sync.Mutex
 }
 
 // New builds a client. endpoint is the router web base URL, e.g. "http://192.168.18.1".
@@ -107,6 +112,8 @@ func (c *Client) auth(ctx context.Context) error {
 
 // get fetches an RCI path and decodes the JSON body into out. Re-authenticates once on 401.
 func (c *Client) get(ctx context.Context, path string, out interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := c.auth(ctx); err != nil {
 		return err
 	}
@@ -137,6 +144,8 @@ func (c *Client) get(ctx context.Context, path string, out interface{}) error {
 
 // post sends a command array to /rci/ and returns the raw response for status inspection.
 func (c *Client) post(ctx context.Context, cmd interface{}) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := c.auth(ctx); err != nil {
 		return nil, err
 	}
@@ -144,14 +153,33 @@ func (c *Client) post(ctx context.Context, cmd interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/rci/", bytes.NewReader(body))
+	newReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/rci/", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}
+	req, err := newReq()
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		drain(resp)
+		if err := c.auth(ctx); err != nil {
+			return nil, err
+		}
+		if req, err = newReq(); err != nil {
+			return nil, err
+		}
+		if resp, err = c.http.Do(req); err != nil {
+			return nil, err
+		}
 	}
 	defer drain(resp)
 	raw, _ := io.ReadAll(resp.Body)
