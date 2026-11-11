@@ -5,8 +5,8 @@ An OpenTofu / Terraform provider for **Keenetic** routers, driving the router's 
 registry.
 
 Status: **working.** `keenetic_segment` (IPv4 + DHCP pool + Wi-Fi + VLAN, with VLAN-conflict
-detection), `keenetic_static_lease` (DHCP reservations) and `keenetic_mdns_reflector` (global mDNS).
-Verified end-to-end against a live router.
+detection), `keenetic_client` (registered devices: name + reserved IP), `keenetic_static_lease` (DHCP
+reservations) and `keenetic_mdns_reflector` (global mDNS). Verified end-to-end against a live router.
 
 ## Authentication
 
@@ -87,6 +87,13 @@ resource "keenetic_static_lease" "nas" {
   ip  = "192.168.90.10"
 }
 
+# A registered device: a named host (device list) + optional reserved IP.
+resource "keenetic_client" "laptop" {
+  name = "my-laptop"
+  mac  = "aa:bb:cc:dd:ee:01"
+  ip   = "192.168.90.20" # optional
+}
+
 # Global mDNS reflector (relays Bonjour/Chromecast between segments). One per router.
 resource "keenetic_mdns_reflector" "this" {
   enforce = true
@@ -130,6 +137,7 @@ internal/client/client.go     RCI client: NDM auth, GET/POST, config save, error
 internal/client/segment.go    segment model + Get/Apply/Delete (orchestrates DHCP + Wi-Fi)
 internal/client/wireless.go   access-point config + bridge membership (per-band)
 internal/client/vlan.go       VLAN sub-interfaces + bridge membership + conflict detection
+internal/client/known_host.go registered devices: known host (name) + ip dhcp host (reservation)
 internal/client/static_lease.go  ip dhcp host get/apply/delete
 internal/client/mdns.go       global mDNS reflector get/set
 internal/provider/provider.go provider schema + configuration (registers all resources)
@@ -149,5 +157,7 @@ examples/segment/main.tf      runnable example
   per band, on a spare AP slot, bound to the segment's bridge.
 - [x] `keenetic_segment.vlan { id, ports }` — 802.1Q VLAN sub-interfaces bound to the segment, with
   conflict detection (refuses a VLAN id already carried by another segment).
+- [x] `keenetic_client { name, mac, ip }` — registered device (known host) + optional reserved IP.
+  (Single-host deletes are MAC-scoped: deleting a known host by name alone wipes the whole list.)
 - [ ] Switch-port / `iseg` port assignment (tagged vs untagged ports) and ACLs.
 - [ ] Publish to the OpenTofu registry so CI can `init` it without dev overrides / a built mirror.

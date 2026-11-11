@@ -97,6 +97,7 @@ func (p *keeneticProvider) Resources(_ context.Context) []func() resource.Resour
 		NewSegmentResource,
 		NewStaticLeaseResource,
 		NewMDNSReflectorResource,
+		NewClientResource,
 	}
 }
 
