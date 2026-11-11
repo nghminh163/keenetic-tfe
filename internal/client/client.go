@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,8 +36,17 @@ type Client struct {
 	password string
 	http     *http.Client
 
-	mu sync.Mutex // serializes auth + writes (the router applies config non-atomically)
+	mu sync.Mutex // serializes writes (the router applies config non-atomically)
+
+	// authMu serializes the NDM handshake. Tofu reads resources in parallel; concurrent handshakes
+	// each GET /auth, and every 401 hands out a fresh challenge + session cookie into the one shared
+	// jar, so a POST answering challenge A can go out with session B's cookie and be refused (401).
+	authMu sync.Mutex
 }
+
+// errAuthRejected: POST /auth was refused. With the handshake serialized this means wrong credentials
+// or a challenge the router invalidated in between (another client logged in), so it is retried.
+var errAuthRejected = errors.New("authentication failed")
 
 // New builds a client. endpoint is the router web base URL, e.g. "http://192.168.18.1".
 func New(endpoint, username, password string) (*Client, error) {
@@ -55,8 +65,26 @@ func New(endpoint, username, password string) (*Client, error) {
 	}, nil
 }
 
-// auth performs the NDM handshake if the session is not already authenticated.
+// auth performs the NDM handshake if the session is not already authenticated. One handshake at a
+// time (authMu); a refused challenge is retried with a fresh one before giving up.
 func (c *Client) auth(ctx context.Context) error {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err = c.authOnce(ctx); err == nil || !errors.Is(err, errAuthRejected) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func (c *Client) authOnce(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/auth", nil)
 	if err != nil {
 		return err
@@ -100,7 +128,7 @@ func (c *Client) auth(ctx context.Context) error {
 	}
 	defer drain(presp)
 	if presp.StatusCode != http.StatusOK {
-		return fmt.Errorf("authentication failed (status %d): check username/password", presp.StatusCode)
+		return fmt.Errorf("%w (status %d): check username/password", errAuthRejected, presp.StatusCode)
 	}
 	return nil
 }
