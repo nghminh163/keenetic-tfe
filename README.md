@@ -38,16 +38,29 @@ provider "keenetic" {
 resource "keenetic_segment" "test" {
   name        = "Bridge2"        # interface id; changing it replaces the segment
   description = "my segment"
-  address     = "192.168.90.1"   # segment gateway IPv4
-  mask        = "255.255.255.0"  # optional, default /24
+
+  ipv4 = {
+    address = "192.168.90.1"     # segment gateway IPv4
+    mask    = "255.255.255.0"    # optional, default /24
+
+    dhcp = {                     # optional: omit to run the segment without DHCP
+      enabled     = true
+      range_start = "192.168.90.33"
+      range_size  = 120                       # last address derived into range_end
+      dns_servers = ["45.90.28.137", "45.90.30.137"]
+      lease_time  = 25200
+    }
+  }
+
   # security_level = "private"   # private | protected | public (default private)
   # up             = true        # default true
 }
 ```
 
-A `keenetic_segment` is an `interface Bridge<N>` with a gateway IP. It is created with **no member
-ports, VLANs or Wi-Fi APs** — attach those in the UI or via future resources. Import an existing
-one with `tofu import keenetic_segment.x Bridge1`.
+A `keenetic_segment` is an `interface Bridge<N>` with IPv4 settings and an optional bound DHCP pool
+(named `tf-<segment>`, so it never collides with the router's own `_WEBADMIN` pool). It is created
+with **no member ports, VLANs or Wi-Fi APs** — attach those in the UI or via future resources. Import
+an existing one with `tofu import keenetic_segment.x Bridge1`.
 
 ## Build & local test (dev overrides)
 
@@ -86,7 +99,9 @@ examples/segment/main.tf      runnable example
 
 ## Roadmap
 
-- `keenetic_dhcp_pool` — per-segment DHCP (range, gateway, **DNS server**, lease time).
-- `keenetic_dhcp_host` — static leases.
-- Segment membership (ports / VLAN / Wi-Fi AP binding) and ACLs.
-- Publish to the OpenTofu registry so CI can `init` it without dev overrides.
+- [x] `keenetic_segment.ipv4.dhcp` — per-segment DHCP pool (range, **DNS servers**, lease).
+- [ ] DHCP static leases (`ip dhcp host`).
+- [ ] `ipv4.relay_multicast_dns` — mDNS reflector toggle.
+- [ ] `wireless { band_2ghz, band_5ghz }` — SSID / security / PSK (sensitive) per band.
+- [ ] Segment membership (ports / VLAN / Wi-Fi AP binding) and ACLs.
+- [ ] Publish to the OpenTofu registry so CI can `init` it without dev overrides.
