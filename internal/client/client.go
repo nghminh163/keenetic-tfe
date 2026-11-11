@@ -35,12 +35,21 @@ type Client struct {
 	password string
 	http     *http.Client
 
-	// mu serializes every RCI round-trip (get/post, and so save). The NDM challenge is bound to
-	// the session cookie in the shared jar, so two concurrent auth handshakes would overwrite each
-	// other's cookie and one POST /auth would be sent with the wrong session -> intermittent 401.
-	// Terraform drives resources in parallel (default -parallelism=10), so this must be held for the
-	// whole call, auth included, to keep each handshake + request atomic on the shared client.
+	// mu serializes a writer's whole read-modify-write-save sequence (the router applies config
+	// non-atomically). Held by the Apply/Delete methods in segment.go/known_host.go/etc., which then
+	// call get/post/save — so get/post must NOT take mu, or a writer self-deadlocks (mu is not
+	// reentrant).
 	mu sync.Mutex
+
+	// authMu makes the NDM handshake atomic. The challenge is bound to the session cookie in the
+	// shared jar, so two concurrent `GET /auth`+`POST /auth` pairs would overwrite each other's
+	// cookie and one POST /auth would go out with the wrong session -> intermittent 401. Reads run
+	// without mu (parallel, -parallelism=10), so the handshake needs its own lock. It is finer than
+	// mu: only the brief handshake is serialized, the RCI reads/writes still run concurrently.
+	authMu sync.Mutex
+	authed bool // guarded by authMu; true once a session is established, so auth() skips the
+	// GET /auth + POST /auth round-trips. A real 401 on an RCI call clears it (invalidateAuth) and
+	// the get/post retry re-authenticates, so a server-side session expiry self-heals.
 }
 
 // New builds a client. endpoint is the router web base URL, e.g. "http://192.168.18.1".
@@ -62,6 +71,11 @@ func New(endpoint, username, password string) (*Client, error) {
 
 // auth performs the NDM handshake if the session is not already authenticated.
 func (c *Client) auth(ctx context.Context) error {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if c.authed {
+		return nil // session already established; a real 401 later clears this and re-auths
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/auth", nil)
 	if err != nil {
 		return err
@@ -74,6 +88,7 @@ func (c *Client) auth(ctx context.Context) error {
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		c.authed = true
 		return nil // session already valid
 	case http.StatusUnauthorized:
 		// fall through to challenge-response
@@ -107,13 +122,20 @@ func (c *Client) auth(ctx context.Context) error {
 	if presp.StatusCode != http.StatusOK {
 		return fmt.Errorf("authentication failed (status %d): check username/password", presp.StatusCode)
 	}
+	c.authed = true
 	return nil
+}
+
+// invalidateAuth clears the cached session so the next auth() redoes the handshake. Called when an
+// RCI call gets a 401 (the server-side session expired or was dropped).
+func (c *Client) invalidateAuth() {
+	c.authMu.Lock()
+	c.authed = false
+	c.authMu.Unlock()
 }
 
 // get fetches an RCI path and decodes the JSON body into out. Re-authenticates once on 401.
 func (c *Client) get(ctx context.Context, path string, out interface{}) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.auth(ctx); err != nil {
 		return err
 	}
@@ -127,6 +149,7 @@ func (c *Client) get(ctx context.Context, path string, out interface{}) error {
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		drain(resp)
+		c.invalidateAuth()
 		if err := c.auth(ctx); err != nil {
 			return err
 		}
@@ -144,8 +167,6 @@ func (c *Client) get(ctx context.Context, path string, out interface{}) error {
 
 // post sends a command array to /rci/ and returns the raw response for status inspection.
 func (c *Client) post(ctx context.Context, cmd interface{}) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err := c.auth(ctx); err != nil {
 		return nil, err
 	}
@@ -171,6 +192,7 @@ func (c *Client) post(ctx context.Context, cmd interface{}) ([]byte, error) {
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		drain(resp)
+		c.invalidateAuth()
 		if err := c.auth(ctx); err != nil {
 			return nil, err
 		}
